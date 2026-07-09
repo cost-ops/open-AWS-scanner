@@ -68,6 +68,33 @@ def health_check():
     return {"status": "online", "scan_interval_hours": SCAN_INTERVAL_HOURS}
 
 
+@app.get("/status")
+def scanner_status():
+    """Detailed status for reporting to admin dashboards."""
+    db = SessionLocal()
+    total_findings = db.query(ScanResult).count()
+    open_findings = db.query(ScanResult).filter(ScanResult.status.in_(["open", None])).count()
+    total_runs = db.query(ScanRun).count()
+    last_run = db.query(ScanRun).order_by(ScanRun.started_at.desc()).first()
+    db.close()
+
+    jobs = scheduler.get_jobs()
+    active_scanners = len([j for j in jobs if j.id.startswith("scheduled")])
+
+    return {
+        "status": "online",
+        "version": "0.2.0",
+        "active_scanners": active_scanners,
+        "scheduled_jobs": len(jobs),
+        "scan_interval_hours": SCAN_INTERVAL_HOURS,
+        "total_findings": total_findings,
+        "open_findings": open_findings,
+        "total_scan_runs": total_runs,
+        "last_scan": last_run.completed_at.isoformat() if last_run and last_run.completed_at else None,
+        "last_scan_status": last_run.status if last_run else None,
+    }
+
+
 # --- Dashboard ---
 
 @app.get("/", include_in_schema=False)
