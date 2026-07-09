@@ -43,7 +43,9 @@ jobs:
           path: dist/
 
       - name: Install sigstore
-        run: pip install sigstore
+        run: |
+          pip install --upgrade pip
+          pip install sigstore --upgrade
 
       - name: Sign with Sigstore
         run: |
