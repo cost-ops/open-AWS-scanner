@@ -27,5 +27,16 @@ jobs:
       - name: Build package
         run: python -m build
 
+      - name: Sign with Sigstore
+        run: |
+          pip install sigstore
+          sigstore sign dist/*
+
+      - name: Upload signatures to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload ${{ github.event.release.tag_name }} dist/*.sigstore.json
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
