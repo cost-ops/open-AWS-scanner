@@ -45,7 +45,8 @@ jobs:
       - name: Install sigstore
         run: |
           pip install --upgrade pip
-          pip install sigstore --upgrade
+          pip uninstall -y pyOpenSSL cryptography 2>/dev/null || true
+          pip install sigstore
 
       - name: Sign with Sigstore
         run: |
