@@ -39,5 +39,8 @@ jobs:
         run: |
           gh release upload ${{ github.event.release.tag_name }} dist/*.sigstore.json
 
+      - name: Remove signatures before publish
+        run: rm -f dist/*.sigstore.json
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
