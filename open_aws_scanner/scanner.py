@@ -602,3 +602,1010 @@ def run_scan():
         db.close()
 
     return findings
+
+
+# --- Additional Scanners (advanced) ---
+
+def get_idle_ecs_services(ecs, cloudwatch):
+    """Find ECS services with zero running tasks or no CPU usage."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    clusters = ecs.list_clusters().get("clusterArns", [])
+    for cluster_arn in clusters:
+        cluster_name = cluster_arn.split("/")[-1]
+        services = ecs.list_services(cluster=cluster_arn).get("serviceArns", [])
+        if not services:
+            continue
+        described = ecs.describe_services(cluster=cluster_arn, services=services[:10]).get("services", [])
+        for svc in described:
+            svc_name = svc["serviceName"]
+            running = svc.get("runningCount", 0)
+            desired = svc.get("desiredCount", 0)
+
+            if running == 0 and desired == 0:
+                findings.append({
+                    "resource_id": svc["serviceArn"],
+                    "resource_name": f"{cluster_name}/{svc_name}",
+                    "resource_type": "ECS_Service",
+                    "reason": "Service has zero desired and running tasks",
+                    "estimated_monthly_savings": 0,
+                })
+                continue
+
+            metrics = cloudwatch.get_metric_statistics(
+                Namespace="AWS/ECS", MetricName="CPUUtilization",
+                Dimensions=[
+                    {"Name": "ClusterName", "Value": cluster_name},
+                    {"Name": "ServiceName", "Value": svc_name},
+                ],
+                StartTime=now - timedelta(days=7), EndTime=now,
+                Period=604800, Statistics=["Average"],
+            )
+            datapoints = metrics.get("Datapoints", [])
+            if datapoints and all(dp["Average"] < 2.0 for dp in datapoints):
+                findings.append({
+                    "resource_id": svc["serviceArn"],
+                    "resource_name": f"{cluster_name}/{svc_name}",
+                    "resource_type": "ECS_Service",
+                    "reason": f"CPU avg < 2% over last 7 days ({running} running tasks)",
+                    "estimated_monthly_savings": None,
+                })
+    return findings
+
+
+def get_idle_ecr_repos(ecr):
+    """Find ECR repositories with no image pulls in last 30 days."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=30)
+    paginator = ecr.get_paginator("describe_repositories")
+    for page in paginator.paginate():
+        for repo in page.get("repositories", []):
+            repo_name = repo["repositoryName"]
+            try:
+                images = ecr.describe_images(
+                    repositoryName=repo_name,
+                    filter={"tagStatus": "ANY"},
+                    maxResults=5,
+                ).get("imageDetails", [])
+            except Exception:
+                continue
+
+            if not images:
+                findings.append({
+                    "resource_id": repo.get("repositoryArn", repo_name),
+                    "resource_name": repo_name,
+                    "resource_type": "ECR_Repository",
+                    "reason": "Repository has no images",
+                    "estimated_monthly_savings": 0,
+                })
+                continue
+
+            last_pull = None
+            total_size = 0
+            for img in images:
+                pull_time = img.get("lastRecordedPullTime")
+                if pull_time and (not last_pull or pull_time > last_pull):
+                    last_pull = pull_time
+                total_size += img.get("imageSizeInBytes", 0)
+
+            if last_pull and last_pull < threshold:
+                days_idle = (now - last_pull.replace(tzinfo=timezone.utc)).days
+                size_gb = total_size / (1024**3)
+                est_cost = round(size_gb * 0.10, 2)
+                findings.append({
+                    "resource_id": repo.get("repositoryArn", repo_name),
+                    "resource_name": repo_name,
+                    "resource_type": "ECR_Repository",
+                    "reason": f"No image pulls in {days_idle} days ({size_gb:.2f} GB stored)",
+                    "estimated_monthly_savings": est_cost,
+                })
+            elif not last_pull and images:
+                size_gb = total_size / (1024**3)
+                est_cost = round(size_gb * 0.10, 2)
+                findings.append({
+                    "resource_id": repo.get("repositoryArn", repo_name),
+                    "resource_name": repo_name,
+                    "resource_type": "ECR_Repository",
+                    "reason": f"Images never pulled ({size_gb:.2f} GB stored)",
+                    "estimated_monthly_savings": est_cost,
+                })
+    return findings
+
+
+def get_idle_cloudfront_distributions(cloudfront, cloudwatch):
+    """Find CloudFront distributions with no requests."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    dists = cloudfront.list_distributions().get("DistributionList", {}).get("Items", [])
+    for dist in dists:
+        dist_id = dist["Id"]
+        domain = dist.get("DomainName", dist_id)
+        metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/CloudFront", MetricName="Requests",
+            Dimensions=[
+                {"Name": "DistributionId", "Value": dist_id},
+                {"Name": "Region", "Value": "Global"},
+            ],
+            StartTime=now - timedelta(days=7), EndTime=now,
+            Period=604800, Statistics=["Sum"],
+        )
+        datapoints = metrics.get("Datapoints", [])
+        if not datapoints or all(dp["Sum"] == 0 for dp in datapoints):
+            findings.append({
+                "resource_id": dist_id,
+                "resource_name": domain,
+                "resource_type": "CloudFront_Distribution",
+                "reason": "Zero requests in last 7 days",
+                "estimated_monthly_savings": None,
+            })
+    return findings
+
+
+def get_inactive_s3_buckets(s3, cloudwatch):
+    """Find S3 buckets with no GET/PUT requests in the last 30 days."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    for bucket in s3.list_buckets().get("Buckets", []):
+        name = bucket["Name"]
+        get_metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/S3", MetricName="GetRequests",
+            Dimensions=[{"Name": "BucketName", "Value": name}, {"Name": "FilterId", "Value": "EntireBucket"}],
+            StartTime=now - timedelta(days=30), EndTime=now, Period=2592000, Statistics=["Sum"],
+        )
+        put_metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/S3", MetricName="PutRequests",
+            Dimensions=[{"Name": "BucketName", "Value": name}, {"Name": "FilterId", "Value": "EntireBucket"}],
+            StartTime=now - timedelta(days=30), EndTime=now, Period=2592000, Statistics=["Sum"],
+        )
+        get_points = get_metrics.get("Datapoints", [])
+        put_points = put_metrics.get("Datapoints", [])
+        has_get_data = len(get_points) > 0
+        has_put_data = len(put_points) > 0
+        if has_get_data or has_put_data:
+            total_gets = sum(dp["Sum"] for dp in get_points) if get_points else 0
+            total_puts = sum(dp["Sum"] for dp in put_points) if put_points else 0
+            if total_gets == 0 and total_puts == 0:
+                size_metrics = cloudwatch.get_metric_statistics(
+                    Namespace="AWS/S3", MetricName="BucketSizeBytes",
+                    Dimensions=[{"Name": "BucketName", "Value": name}, {"Name": "StorageType", "Value": "StandardStorage"}],
+                    StartTime=now - timedelta(days=2), EndTime=now, Period=86400, Statistics=["Average"],
+                )
+                size_points = size_metrics.get("Datapoints", [])
+                size_gb = (size_points[-1]["Average"] / (1024**3)) if size_points else 0
+                est_cost = round(size_gb * 0.023, 2)
+                findings.append({
+                    "resource_id": name, "resource_name": name, "resource_type": "S3_Bucket_Inactive",
+                    "reason": f"Zero GET/PUT requests in last 30 days ({size_gb:.1f} GB stored)",
+                    "estimated_monthly_savings": est_cost,
+                })
+    return findings
+
+
+def get_stale_s3_buckets(s3):
+    """Find S3 buckets where all objects are older than 90 days."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    stale_threshold = now - timedelta(days=90)
+    for bucket in s3.list_buckets().get("Buckets", []):
+        name = bucket["Name"]
+        try:
+            response = s3.list_objects_v2(Bucket=name, MaxKeys=100)
+            objects = response.get("Contents", [])
+            if not objects:
+                continue
+            newest_modified = max(obj["LastModified"] for obj in objects)
+            total_size = sum(obj["Size"] for obj in objects)
+            if newest_modified < stale_threshold:
+                days_stale = (now - newest_modified).days
+                is_truncated = response.get("IsTruncated", False)
+                size_gb = total_size / (1024**3)
+                est_cost = round(size_gb * 0.023, 2)
+                size_label = f"{size_gb:.2f} GB" if size_gb >= 1 else f"{total_size / (1024**2):.1f} MB"
+                truncated_note = " (sampled 100 objects)" if is_truncated else ""
+                findings.append({
+                    "resource_id": name, "resource_name": name, "resource_type": "S3_Bucket_Stale",
+                    "reason": f"No objects modified in {days_stale} days — {size_label} stored{truncated_note}",
+                    "estimated_monthly_savings": est_cost,
+                })
+        except Exception:
+            continue
+    return findings
+
+
+def get_idle_redshift_clusters(redshift, cloudwatch):
+    """Find Redshift clusters with no query activity."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    clusters = redshift.describe_clusters().get("Clusters", [])
+    for cluster in clusters:
+        cluster_id = cluster["ClusterIdentifier"]
+        metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/Redshift", MetricName="DatabaseConnections",
+            Dimensions=[{"Name": "ClusterIdentifier", "Value": cluster_id}],
+            StartTime=now - timedelta(days=7), EndTime=now, Period=86400, Statistics=["Average"],
+        )
+        datapoints = metrics.get("Datapoints", [])
+        if datapoints and all(dp["Average"] < 1.0 for dp in datapoints):
+            node_type = cluster.get("NodeType", "unknown")
+            num_nodes = cluster.get("NumberOfNodes", 1)
+            findings.append({
+                "resource_id": cluster_id, "resource_name": cluster_id, "resource_type": "Redshift_Cluster",
+                "reason": f"Avg connections < 1 over last 7 days ({node_type} x{num_nodes})",
+                "estimated_monthly_savings": None,
+            })
+    return findings
+
+
+def get_idle_opensearch_domains(opensearch, cloudwatch):
+    """Find OpenSearch domains with no search or indexing activity."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    domains = opensearch.list_domain_names().get("DomainNames", [])
+    for domain in domains:
+        domain_name = domain["DomainName"]
+        search_metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/ES", MetricName="SearchRate",
+            Dimensions=[{"Name": "DomainName", "Value": domain_name}, {"Name": "ClientId", "Value": "*"}],
+            StartTime=now - timedelta(days=7), EndTime=now, Period=604800, Statistics=["Sum"],
+        )
+        index_metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/ES", MetricName="IndexingRate",
+            Dimensions=[{"Name": "DomainName", "Value": domain_name}, {"Name": "ClientId", "Value": "*"}],
+            StartTime=now - timedelta(days=7), EndTime=now, Period=604800, Statistics=["Sum"],
+        )
+        search_points = search_metrics.get("Datapoints", [])
+        index_points = index_metrics.get("Datapoints", [])
+        total_searches = sum(dp["Sum"] for dp in search_points) if search_points else 0
+        total_indexes = sum(dp["Sum"] for dp in index_points) if index_points else 0
+        if (search_points or index_points) and total_searches == 0 and total_indexes == 0:
+            findings.append({
+                "resource_id": domain_name, "resource_name": domain_name, "resource_type": "OpenSearch_Domain",
+                "reason": "Zero search and indexing operations in last 7 days",
+                "estimated_monthly_savings": None,
+            })
+    return findings
+
+
+def get_idle_eks_nodegroups(eks, cloudwatch):
+    """Find EKS node groups with very low CPU utilization."""
+    findings = []
+    clusters = eks.list_clusters().get("clusters", [])
+    for cluster_name in clusters:
+        nodegroups = eks.list_nodegroups(clusterName=cluster_name).get("nodegroups", [])
+        for ng_name in nodegroups:
+            ng = eks.describe_nodegroup(clusterName=cluster_name, nodegroupName=ng_name).get("nodegroup", {})
+            desired = ng.get("scalingConfig", {}).get("desiredSize", 0)
+            if desired == 0:
+                findings.append({
+                    "resource_id": ng.get("nodegroupArn", f"{cluster_name}/{ng_name}"),
+                    "resource_name": f"{cluster_name}/{ng_name}", "resource_type": "EKS_NodeGroup",
+                    "reason": "Node group scaled to zero desired nodes", "estimated_monthly_savings": 0,
+                })
+    return findings
+
+
+def get_idle_apprunner_services(apprunner, cloudwatch):
+    """Find App Runner services with no traffic."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    services = apprunner.list_services().get("ServiceSummaryList", [])
+    for svc in services:
+        svc_name = svc["ServiceName"]
+        svc_arn = svc["ServiceArn"]
+        metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/AppRunner", MetricName="RequestCount",
+            Dimensions=[{"Name": "ServiceName", "Value": svc_name}],
+            StartTime=now - timedelta(days=7), EndTime=now, Period=604800, Statistics=["Sum"],
+        )
+        datapoints = metrics.get("Datapoints", [])
+        if not datapoints or all(dp["Sum"] == 0 for dp in datapoints):
+            findings.append({
+                "resource_id": svc_arn, "resource_name": svc_name, "resource_type": "AppRunner_Service",
+                "reason": "Zero requests in last 7 days", "estimated_monthly_savings": None,
+            })
+    return findings
+
+
+def get_idle_efs_filesystems(efs, cloudwatch):
+    """Find EFS file systems with zero client connections."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    filesystems = efs.describe_file_systems().get("FileSystems", [])
+    for fs in filesystems:
+        fs_id = fs["FileSystemId"]
+        name = fs.get("Name", fs_id)
+        metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/EFS", MetricName="ClientConnections",
+            Dimensions=[{"Name": "FileSystemId", "Value": fs_id}],
+            StartTime=now - timedelta(days=7), EndTime=now, Period=604800, Statistics=["Sum"],
+        )
+        datapoints = metrics.get("Datapoints", [])
+        if datapoints and all(dp["Sum"] == 0 for dp in datapoints):
+            size_bytes = fs.get("SizeInBytes", {}).get("Value", 0)
+            size_gb = size_bytes / (1024**3)
+            est_cost = round(size_gb * 0.30, 2)
+            findings.append({
+                "resource_id": fs_id, "resource_name": name, "resource_type": "EFS_FileSystem",
+                "reason": f"Zero client connections in last 7 days ({size_gb:.2f} GB)",
+                "estimated_monthly_savings": est_cost,
+            })
+    return findings
+
+
+def get_idle_fsx_filesystems(fsx):
+    """Find FSx file systems that appear unused."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    filesystems = fsx.describe_file_systems().get("FileSystems", [])
+    for fs in filesystems:
+        fs_id = fs["FileSystemId"]
+        fs_type = fs.get("FileSystemType", "unknown")
+        storage_gb = fs.get("StorageCapacity", 0)
+        created = fs.get("CreationTime")
+        if created:
+            age_days = (now - created.replace(tzinfo=timezone.utc)).days
+            if age_days > 90:
+                est_cost = round(storage_gb * 0.13, 2)
+                findings.append({
+                    "resource_id": fs_id, "resource_name": fs_id, "resource_type": "FSx_FileSystem",
+                    "reason": f"{fs_type} filesystem — {storage_gb} GB, {age_days} days old (verify usage)",
+                    "estimated_monthly_savings": est_cost,
+                })
+    return findings
+
+
+def get_idle_kinesis_streams(kinesis, cloudwatch):
+    """Find Kinesis streams with no incoming records."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    streams = kinesis.list_streams().get("StreamNames", [])
+    for stream_name in streams:
+        metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/Kinesis", MetricName="IncomingRecords",
+            Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+            StartTime=now - timedelta(days=7), EndTime=now, Period=604800, Statistics=["Sum"],
+        )
+        datapoints = metrics.get("Datapoints", [])
+        if not datapoints or all(dp["Sum"] == 0 for dp in datapoints):
+            try:
+                desc = kinesis.describe_stream_summary(StreamName=stream_name)
+                shards = desc.get("StreamDescriptionSummary", {}).get("OpenShardCount", 1)
+                est_cost = round(shards * 36.0, 2)
+            except Exception:
+                est_cost = None
+            findings.append({
+                "resource_id": stream_name, "resource_name": stream_name, "resource_type": "Kinesis_Stream",
+                "reason": "Zero incoming records in last 7 days", "estimated_monthly_savings": est_cost,
+            })
+    return findings
+
+
+def get_idle_sagemaker_endpoints(sagemaker, cloudwatch):
+    """Find SageMaker endpoints with no invocations."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    endpoints = sagemaker.list_endpoints(StatusEquals="InService").get("Endpoints", [])
+    for ep in endpoints:
+        ep_name = ep["EndpointName"]
+        metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/SageMaker", MetricName="Invocations",
+            Dimensions=[{"Name": "EndpointName", "Value": ep_name}],
+            StartTime=now - timedelta(days=7), EndTime=now, Period=604800, Statistics=["Sum"],
+        )
+        datapoints = metrics.get("Datapoints", [])
+        if not datapoints or all(dp["Sum"] == 0 for dp in datapoints):
+            findings.append({
+                "resource_id": ep.get("EndpointArn", ep_name), "resource_name": ep_name,
+                "resource_type": "SageMaker_Endpoint",
+                "reason": "Zero invocations in last 7 days", "estimated_monthly_savings": None,
+            })
+    return findings
+
+
+def get_idle_sagemaker_notebooks(sagemaker):
+    """Find SageMaker notebook instances in service but potentially unused."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    notebooks = sagemaker.list_notebook_instances(StatusEquals="InService").get("NotebookInstances", [])
+    for nb in notebooks:
+        nb_name = nb["NotebookInstanceName"]
+        instance_type = nb.get("InstanceType", "unknown")
+        last_modified = nb.get("LastModifiedTime")
+        if last_modified:
+            days_idle = (now - last_modified.replace(tzinfo=timezone.utc)).days
+            if days_idle > 7:
+                findings.append({
+                    "resource_id": nb.get("NotebookInstanceArn", nb_name), "resource_name": nb_name,
+                    "resource_type": "SageMaker_Notebook",
+                    "reason": f"Running ({instance_type}) but not modified in {days_idle} days",
+                    "estimated_monthly_savings": None,
+                })
+    return findings
+
+
+def get_idle_api_gateways(apigateway, cloudwatch):
+    """Find API Gateway REST APIs with no requests."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    apis = apigateway.get_rest_apis().get("items", [])
+    for api in apis:
+        api_id = api["id"]
+        api_name = api.get("name", api_id)
+        metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/ApiGateway", MetricName="Count",
+            Dimensions=[{"Name": "ApiName", "Value": api_name}],
+            StartTime=now - timedelta(days=14), EndTime=now, Period=1209600, Statistics=["Sum"],
+        )
+        datapoints = metrics.get("Datapoints", [])
+        if not datapoints or all(dp["Sum"] == 0 for dp in datapoints):
+            findings.append({
+                "resource_id": api_id, "resource_name": api_name, "resource_type": "API_Gateway",
+                "reason": "Zero API calls in last 14 days", "estimated_monthly_savings": 0,
+            })
+    return findings
+
+
+def get_idle_step_functions(sfn, cloudwatch):
+    """Find Step Functions state machines with no executions."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    machines = sfn.list_state_machines().get("stateMachines", [])
+    for sm in machines:
+        sm_name = sm["name"]
+        sm_arn = sm["stateMachineArn"]
+        metrics = cloudwatch.get_metric_statistics(
+            Namespace="AWS/States", MetricName="ExecutionsStarted",
+            Dimensions=[{"Name": "StateMachineArn", "Value": sm_arn}],
+            StartTime=now - timedelta(days=30), EndTime=now, Period=2592000, Statistics=["Sum"],
+        )
+        datapoints = metrics.get("Datapoints", [])
+        if not datapoints or all(dp["Sum"] == 0 for dp in datapoints):
+            findings.append({
+                "resource_id": sm_arn, "resource_name": sm_name, "resource_type": "StepFunctions_StateMachine",
+                "reason": "Zero executions in last 30 days", "estimated_monthly_savings": 0,
+            })
+    return findings
+
+
+def get_idle_glue_jobs(glue):
+    """Find Glue jobs that haven't run recently."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=30)
+    jobs = glue.get_jobs().get("Jobs", [])
+    for job in jobs:
+        job_name = job["Name"]
+        runs = glue.get_job_runs(JobName=job_name, MaxResults=1).get("JobRuns", [])
+        if not runs:
+            findings.append({
+                "resource_id": job_name, "resource_name": job_name, "resource_type": "Glue_Job",
+                "reason": "Glue job has never been executed", "estimated_monthly_savings": 0,
+            })
+        elif runs[0].get("StartedOn", now) < threshold:
+            days_since = (now - runs[0]["StartedOn"].replace(tzinfo=timezone.utc)).days
+            findings.append({
+                "resource_id": job_name, "resource_name": job_name, "resource_type": "Glue_Job",
+                "reason": f"Last execution was {days_since} days ago", "estimated_monthly_savings": 0,
+            })
+    return findings
+
+
+def get_idle_vpn_connections(ec2):
+    """Find VPN connections with DOWN status."""
+    findings = []
+    vpns = ec2.describe_vpn_connections().get("VpnConnections", [])
+    for vpn in vpns:
+        vpn_id = vpn["VpnConnectionId"]
+        name = next((t["Value"] for t in vpn.get("Tags", []) if t["Key"] == "Name"), vpn_id)
+        state = vpn.get("State", "")
+        if state == "available":
+            tunnels = vpn.get("VgwTelemetry", [])
+            all_down = all(t.get("Status") == "DOWN" for t in tunnels) if tunnels else False
+            if all_down:
+                findings.append({
+                    "resource_id": vpn_id, "resource_name": name, "resource_type": "VPN_Connection",
+                    "reason": "All VPN tunnels are DOWN", "estimated_monthly_savings": 36.50,
+                })
+    return findings
+
+
+def get_idle_transit_gateways(ec2):
+    """Find Transit Gateways with no attachments."""
+    findings = []
+    tgws = ec2.describe_transit_gateways().get("TransitGateways", [])
+    for tgw in tgws:
+        tgw_id = tgw["TransitGatewayId"]
+        name = next((t["Value"] for t in tgw.get("Tags", []) if t["Key"] == "Name"), tgw_id)
+        attachments = ec2.describe_transit_gateway_attachments(
+            Filters=[{"Name": "transit-gateway-id", "Values": [tgw_id]}]
+        ).get("TransitGatewayAttachments", [])
+        if not attachments:
+            findings.append({
+                "resource_id": tgw_id, "resource_name": name, "resource_type": "Transit_Gateway",
+                "reason": "Transit Gateway has no attachments", "estimated_monthly_savings": 36.00,
+            })
+    return findings
+
+
+def get_unused_kms_keys(kms):
+    """Find KMS keys that haven't been used recently."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=90)
+    paginator = kms.get_paginator("list_keys")
+    for page in paginator.paginate():
+        for key in page.get("Keys", []):
+            key_id = key["KeyId"]
+            try:
+                metadata = kms.describe_key(KeyId=key_id).get("KeyMetadata", {})
+                if metadata.get("KeyManager") == "AWS":
+                    continue
+                if metadata.get("KeyState") != "Enabled":
+                    continue
+                key_alias = key_id
+                aliases = kms.list_aliases(KeyId=key_id).get("Aliases", [])
+                if aliases:
+                    key_alias = aliases[0].get("AliasName", key_id)
+                created = metadata.get("CreationDate")
+                if created and created.replace(tzinfo=timezone.utc) < threshold:
+                    findings.append({
+                        "resource_id": key_id, "resource_name": key_alias, "resource_type": "KMS_Key",
+                        "reason": "Customer-managed key — verify if still in use ($1/mo)",
+                        "estimated_monthly_savings": 1.00,
+                    })
+            except Exception:
+                continue
+    return findings
+
+
+def get_idle_route53_zones(route53):
+    """Find Route 53 hosted zones with no record sets besides default NS/SOA."""
+    findings = []
+    zones = route53.list_hosted_zones().get("HostedZones", [])
+    for zone in zones:
+        zone_id = zone["Id"].split("/")[-1]
+        zone_name = zone["Name"]
+        record_count = zone.get("ResourceRecordSetCount", 0)
+        if record_count <= 2:
+            findings.append({
+                "resource_id": zone_id, "resource_name": zone_name, "resource_type": "Route53_Zone",
+                "reason": "Hosted zone has no custom records (only NS/SOA)",
+                "estimated_monthly_savings": 0.50,
+            })
+    return findings
+
+
+def get_idle_eventbridge_rules(events):
+    """Find EventBridge rules that are disabled."""
+    findings = []
+    rules = events.list_rules().get("Rules", [])
+    for rule in rules:
+        rule_name = rule["Name"]
+        state = rule.get("State", "")
+        if state == "DISABLED":
+            findings.append({
+                "resource_id": rule.get("Arn", rule_name), "resource_name": rule_name,
+                "resource_type": "EventBridge_Rule",
+                "reason": "Rule is disabled", "estimated_monthly_savings": 0,
+            })
+    return findings
+
+
+def get_idle_emr_clusters(emr):
+    """Find EMR clusters that are waiting/idle."""
+    findings = []
+    clusters = emr.list_clusters(ClusterStates=["WAITING"]).get("Clusters", [])
+    for cluster in clusters:
+        cluster_id = cluster["Id"]
+        cluster_name = cluster.get("Name", cluster_id)
+        findings.append({
+            "resource_id": cluster_id, "resource_name": cluster_name, "resource_type": "EMR_Cluster",
+            "reason": "Cluster in WAITING state (idle, no running steps)",
+            "estimated_monthly_savings": None,
+        })
+    return findings
+
+
+def get_unused_amis(ec2):
+    """Find owned AMIs not used by any running instance."""
+    findings = []
+    images = ec2.describe_images(Owners=["self"]).get("Images", [])
+    instances = ec2.describe_instances(
+        Filters=[{"Name": "instance-state-name", "Values": ["running", "stopped"]}]
+    ).get("Reservations", [])
+    used_amis = set()
+    for res in instances:
+        for inst in res["Instances"]:
+            used_amis.add(inst.get("ImageId"))
+    for img in images:
+        ami_id = img["ImageId"]
+        if ami_id not in used_amis:
+            name = img.get("Name", ami_id)
+            total_size = sum(
+                bdm.get("Ebs", {}).get("VolumeSize", 0)
+                for bdm in img.get("BlockDeviceMappings", []) if "Ebs" in bdm
+            )
+            est_cost = round(total_size * 0.05, 2)
+            findings.append({
+                "resource_id": ami_id, "resource_name": name, "resource_type": "AMI",
+                "reason": f"AMI not used by any instance ({total_size} GB snapshots)",
+                "estimated_monthly_savings": est_cost,
+            })
+    return findings
+
+
+def get_idle_neptune_clusters(neptune, cloudwatch):
+    """Find Neptune clusters with no connections."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        clusters = neptune.describe_db_clusters().get("DBClusters", [])
+        for cluster in clusters:
+            if cluster.get("Engine") != "neptune":
+                continue
+            cluster_id = cluster["DBClusterIdentifier"]
+            gremlin_metrics = cloudwatch.get_metric_statistics(
+                Namespace="AWS/Neptune", MetricName="GremlinRequestsPerSec",
+                Dimensions=[{"Name": "DBClusterIdentifier", "Value": cluster_id}],
+                StartTime=now - timedelta(days=7), EndTime=now, Period=604800, Statistics=["Sum"],
+            )
+            g_points = gremlin_metrics.get("Datapoints", [])
+            if not g_points or all(dp["Sum"] == 0 for dp in g_points):
+                findings.append({
+                    "resource_id": cluster_id, "resource_name": cluster_id,
+                    "resource_type": "Neptune_Cluster",
+                    "reason": "Zero graph queries in last 7 days", "estimated_monthly_savings": None,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_docdb_clusters(docdb, cloudwatch):
+    """Find DocumentDB clusters with no connections."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        clusters = docdb.describe_db_clusters().get("DBClusters", [])
+        for cluster in clusters:
+            if cluster.get("Engine") != "docdb":
+                continue
+            cluster_id = cluster["DBClusterIdentifier"]
+            metrics = cloudwatch.get_metric_statistics(
+                Namespace="AWS/DocDB", MetricName="DatabaseConnections",
+                Dimensions=[{"Name": "DBClusterIdentifier", "Value": cluster_id}],
+                StartTime=now - timedelta(days=7), EndTime=now, Period=86400, Statistics=["Average"],
+            )
+            datapoints = metrics.get("Datapoints", [])
+            if datapoints and all(dp["Average"] < 1.0 for dp in datapoints):
+                findings.append({
+                    "resource_id": cluster_id, "resource_name": cluster_id,
+                    "resource_type": "DocumentDB_Cluster",
+                    "reason": "Avg connections < 1 over last 7 days", "estimated_monthly_savings": None,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_lightsail_instances(lightsail, cloudwatch):
+    """Find Lightsail instances with low CPU."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        instances = lightsail.get_instances().get("instances", [])
+        for inst in instances:
+            inst_name = inst["name"]
+            metrics = lightsail.get_instance_metric_data(
+                instanceName=inst_name, metricName="CPUUtilization",
+                period=86400, startTime=now - timedelta(days=7), endTime=now,
+                unit="Percent", statistics=["Average"],
+            ).get("metricData", [])
+            if metrics and all(dp["average"] < 5.0 for dp in metrics if "average" in dp):
+                bundle = inst.get("bundleId", "unknown")
+                findings.append({
+                    "resource_id": inst.get("arn", inst_name), "resource_name": inst_name,
+                    "resource_type": "Lightsail_Instance",
+                    "reason": f"CPU avg < 5% over last 7 days ({bundle})",
+                    "estimated_monthly_savings": None,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_waf_acls(wafv2):
+    """Find WAF Web ACLs not associated with any resource."""
+    findings = []
+    try:
+        for scope in ["REGIONAL", "CLOUDFRONT"]:
+            acls = wafv2.list_web_acls(Scope=scope).get("WebACLs", [])
+            for acl in acls:
+                acl_name = acl["Name"]
+                acl_id = acl["Id"]
+                acl_arn = acl.get("ARN", "")
+                resources = wafv2.list_resources_for_web_acl(WebACLArn=acl_arn).get("ResourceArns", [])
+                if not resources:
+                    findings.append({
+                        "resource_id": acl_id, "resource_name": acl_name, "resource_type": "WAF_WebACL",
+                        "reason": f"WAF Web ACL ({scope}) not attached to any resource",
+                        "estimated_monthly_savings": 5.00,
+                    })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_global_accelerator(globalaccelerator, cloudwatch):
+    """Find Global Accelerators with no traffic."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        accelerators = globalaccelerator.list_accelerators().get("Accelerators", [])
+        for accel in accelerators:
+            accel_arn = accel["AcceleratorArn"]
+            accel_name = accel.get("Name", accel_arn)
+            metrics = cloudwatch.get_metric_statistics(
+                Namespace="AWS/GlobalAccelerator", MetricName="ProcessedBytesIn",
+                Dimensions=[{"Name": "Accelerator", "Value": accel_arn}],
+                StartTime=now - timedelta(days=7), EndTime=now, Period=604800, Statistics=["Sum"],
+            )
+            datapoints = metrics.get("Datapoints", [])
+            if not datapoints or all(dp["Sum"] == 0 for dp in datapoints):
+                findings.append({
+                    "resource_id": accel_arn, "resource_name": accel_name,
+                    "resource_type": "Global_Accelerator",
+                    "reason": "Zero bytes processed in last 7 days", "estimated_monthly_savings": 18.00,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_codepipeline(codepipeline):
+    """Find CodePipeline pipelines with no recent executions."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=30)
+    try:
+        pipelines = codepipeline.list_pipelines().get("pipelines", [])
+        for p in pipelines:
+            p_name = p["name"]
+            executions = codepipeline.list_pipeline_executions(
+                pipelineName=p_name, maxResults=1
+            ).get("pipelineExecutionSummaries", [])
+            if not executions:
+                findings.append({
+                    "resource_id": p_name, "resource_name": p_name, "resource_type": "CodePipeline",
+                    "reason": "Pipeline has never been executed", "estimated_monthly_savings": 1.00,
+                })
+            elif executions[0].get("startTime", now) < threshold:
+                days = (now - executions[0]["startTime"].replace(tzinfo=timezone.utc)).days
+                findings.append({
+                    "resource_id": p_name, "resource_name": p_name, "resource_type": "CodePipeline",
+                    "reason": f"Last execution was {days} days ago", "estimated_monthly_savings": 1.00,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_codebuild_projects(codebuild):
+    """Find CodeBuild projects with no recent builds."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=30)
+    try:
+        projects = codebuild.list_projects().get("projects", [])
+        for proj_name in projects:
+            builds = codebuild.list_builds_for_project(
+                projectName=proj_name, sortOrder="DESCENDING"
+            ).get("ids", [])
+            if not builds:
+                findings.append({
+                    "resource_id": proj_name, "resource_name": proj_name, "resource_type": "CodeBuild_Project",
+                    "reason": "Project has never been built", "estimated_monthly_savings": 0,
+                })
+            else:
+                build_detail = codebuild.batch_get_builds(ids=[builds[0]]).get("builds", [])
+                if build_detail:
+                    end_time = build_detail[0].get("endTime")
+                    if end_time and end_time.replace(tzinfo=timezone.utc) < threshold:
+                        days = (now - end_time.replace(tzinfo=timezone.utc)).days
+                        findings.append({
+                            "resource_id": proj_name, "resource_name": proj_name,
+                            "resource_type": "CodeBuild_Project",
+                            "reason": f"Last build was {days} days ago", "estimated_monthly_savings": 0,
+                        })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_cognito_pools(cognito):
+    """Find Cognito User Pools with no recent activity."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=30)
+    try:
+        pools = cognito.list_user_pools(MaxResults=60).get("UserPools", [])
+        for pool in pools:
+            pool_id = pool["Id"]
+            pool_name = pool.get("Name", pool_id)
+            last_modified = pool.get("LastModifiedDate")
+            if last_modified and last_modified.replace(tzinfo=timezone.utc) < threshold:
+                days_idle = (now - last_modified.replace(tzinfo=timezone.utc)).days
+                findings.append({
+                    "resource_id": pool_id, "resource_name": pool_name, "resource_type": "Cognito_UserPool",
+                    "reason": f"User pool not modified in {days_idle} days (verify sign-in activity)",
+                    "estimated_monthly_savings": 0,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_cloudwatch_alarms(cloudwatch):
+    """Find CloudWatch alarms in INSUFFICIENT_DATA state."""
+    findings = []
+    try:
+        paginator = cloudwatch.get_paginator("describe_alarms")
+        for page in paginator.paginate(StateValue="INSUFFICIENT_DATA"):
+            for alarm in page.get("MetricAlarms", []):
+                alarm_name = alarm["AlarmName"]
+                findings.append({
+                    "resource_id": alarm.get("AlarmArn", alarm_name), "resource_name": alarm_name,
+                    "resource_type": "CloudWatch_Alarm",
+                    "reason": "Alarm in INSUFFICIENT_DATA state (resource may be deleted)",
+                    "estimated_monthly_savings": 0.10,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_elasticbeanstalk_envs(eb, cloudwatch):
+    """Find Elastic Beanstalk environments with no requests."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        envs = eb.describe_environments(IncludeDeleted=False).get("Environments", [])
+        for env in envs:
+            env_name = env["EnvironmentName"]
+            env_id = env["EnvironmentId"]
+            metrics = cloudwatch.get_metric_statistics(
+                Namespace="AWS/ElasticBeanstalk", MetricName="RequestCount",
+                Dimensions=[{"Name": "EnvironmentName", "Value": env_name}],
+                StartTime=now - timedelta(days=7), EndTime=now, Period=604800, Statistics=["Sum"],
+            )
+            datapoints = metrics.get("Datapoints", [])
+            if not datapoints or all(dp["Sum"] == 0 for dp in datapoints):
+                findings.append({
+                    "resource_id": env_id, "resource_name": env_name,
+                    "resource_type": "ElasticBeanstalk_Env",
+                    "reason": "Zero requests in last 7 days", "estimated_monthly_savings": None,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_mediaconvert_queues(mediaconvert):
+    """Find MediaConvert queues with no recent jobs."""
+    findings = []
+    try:
+        queues = mediaconvert.list_queues().get("Queues", [])
+        for queue in queues:
+            queue_name = queue.get("Name", "")
+            if queue_name == "Default":
+                continue
+            status = queue.get("Status", "")
+            if status == "PAUSED":
+                findings.append({
+                    "resource_id": queue.get("Arn", queue_name), "resource_name": queue_name,
+                    "resource_type": "MediaConvert_Queue",
+                    "reason": "Queue is paused", "estimated_monthly_savings": 0,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_athena_workgroups(athena, cloudwatch):
+    """Find Athena workgroups with no queries."""
+    findings = []
+    try:
+        workgroups = athena.list_work_groups().get("WorkGroups", [])
+        for wg in workgroups:
+            wg_name = wg["Name"]
+            if wg_name == "primary":
+                continue
+            queries = athena.list_query_executions(WorkGroup=wg_name, MaxResults=1).get("QueryExecutionIds", [])
+            if not queries:
+                findings.append({
+                    "resource_id": wg_name, "resource_name": wg_name, "resource_type": "Athena_Workgroup",
+                    "reason": "No queries ever executed in this workgroup",
+                    "estimated_monthly_savings": 0,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_medialive_channels(medialive):
+    """Find MediaLive channels that are running but potentially unused."""
+    findings = []
+    try:
+        channels = medialive.list_channels().get("Channels", [])
+        for channel in channels:
+            channel_id = channel["Id"]
+            channel_name = channel.get("Name", channel_id)
+            state = channel.get("State", "")
+            channel_class = channel.get("ChannelClass", "SINGLE_PIPELINE")
+            if state == "IDLE":
+                findings.append({
+                    "resource_id": channel_id, "resource_name": channel_name,
+                    "resource_type": "MediaLive_Channel",
+                    "reason": f"Channel in IDLE state ({channel_class})",
+                    "estimated_monthly_savings": 0,
+                })
+            elif state == "RUNNING":
+                est_cost = 4380.00 if channel_class == "STANDARD" else 2190.00
+                findings.append({
+                    "resource_id": channel_id, "resource_name": channel_name,
+                    "resource_type": "MediaLive_Channel",
+                    "reason": f"Channel RUNNING ({channel_class}) — verify if actively streaming",
+                    "estimated_monthly_savings": est_cost,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_idle_workspaces(workspaces):
+    """Find WorkSpaces that haven't been used recently."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=30)
+    try:
+        paginator = workspaces.get_paginator("describe_workspaces")
+        workspace_ids = []
+        workspace_map = {}
+        for page in paginator.paginate():
+            for ws in page.get("Workspaces", []):
+                ws_id = ws["WorkspaceId"]
+                workspace_ids.append(ws_id)
+                workspace_map[ws_id] = {
+                    "name": ws.get("UserName", ws_id),
+                    "running_mode": ws.get("WorkspaceProperties", {}).get("RunningMode", "ALWAYS_ON"),
+                }
+        for i in range(0, len(workspace_ids), 25):
+            batch = workspace_ids[i:i+25]
+            connections = workspaces.describe_workspaces_connection_status(
+                WorkspaceIds=batch
+            ).get("WorkspacesConnectionStatus", [])
+            for conn in connections:
+                ws_id = conn["WorkspaceId"]
+                last_known = conn.get("LastKnownUserConnectionTimestamp")
+                ws_info = workspace_map.get(ws_id, {})
+                running_mode = ws_info.get("running_mode", "ALWAYS_ON")
+                est_cost = 50.00 if running_mode == "ALWAYS_ON" else 0
+                if last_known and last_known < threshold:
+                    days_idle = (now - last_known.replace(tzinfo=timezone.utc)).days
+                    findings.append({
+                        "resource_id": ws_id, "resource_name": ws_info.get("name", ws_id),
+                        "resource_type": "WorkSpaces",
+                        "reason": f"No user connection in {days_idle} days ({running_mode})",
+                        "estimated_monthly_savings": est_cost,
+                    })
+                elif not last_known:
+                    findings.append({
+                        "resource_id": ws_id, "resource_name": ws_info.get("name", ws_id),
+                        "resource_type": "WorkSpaces",
+                        "reason": f"WorkSpace has never been connected to ({running_mode})",
+                        "estimated_monthly_savings": est_cost,
+                    })
+    except Exception:
+        pass
+    return findings
