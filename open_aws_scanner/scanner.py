@@ -520,6 +520,8 @@ def run_scan():
                     logs = session.client("logs")
                     sns = session.client("sns")
                     secretsmanager = session.client("secretsmanager")
+                    ecs = session.client("ecs")
+                    compute_optimizer = session.client("compute-optimizer")
 
                     scanners = [
                         ("EBS Volumes", get_unused_ebs_volumes, [ec2]),
@@ -539,6 +541,13 @@ def run_scan():
                         ("ElastiCache Clusters", get_idle_elasticache_clusters, [elasticache, cloudwatch]),
                         ("CloudWatch Log Groups", get_idle_log_groups, [logs]),
                         ("Secrets Manager", get_unused_secrets, [secretsmanager]),
+                        ("ECS Services", get_idle_ecs_services, [ecs, cloudwatch]),
+                        ("Compute Optimizer EC2", get_compute_optimizer_ec2, [compute_optimizer]),
+                        ("Compute Optimizer EBS", get_compute_optimizer_ebs, [compute_optimizer]),
+                        ("Compute Optimizer Lambda", get_compute_optimizer_lambda, [compute_optimizer]),
+                        ("Compute Optimizer ECS", get_compute_optimizer_ecs, [compute_optimizer]),
+                        ("Compute Optimizer RDS", get_compute_optimizer_rds, [compute_optimizer]),
+                        ("Compute Optimizer Idle", get_compute_optimizer_idle, [compute_optimizer]),
                     ]
 
                     for name, func, args in scanners:
@@ -559,6 +568,57 @@ def run_scan():
                 except Exception as e:
                     print(f"[SCAN]   ERROR initializing region {aws_region}: {e}")
                     errors.append(f"Region {aws_region}: {e}")
+
+            # Cost Intelligence scanners (region-independent)
+            print("[SCAN]   === Cost Intelligence ===")
+            try:
+                session = get_aws_session(regions[0])
+                ce = session.client("ce")
+                sts = session.client("sts")
+                account_id = sts.get_caller_identity()["Account"]
+
+                cost_scanners = [
+                    ("Cost Anomalies", get_cost_anomalies, [ce]),
+                    ("Savings Plans Recommendations", get_savings_plans_recommendations, [ce]),
+                    ("Reserved Instance Recommendations", get_reservation_recommendations, [ce]),
+                    ("Savings Plans Utilization", get_savings_plans_utilization, [ce]),
+                    ("Savings Plans Coverage", get_savings_plans_coverage, [ce]),
+                    ("Reservation Utilization", get_reservation_utilization, [ce]),
+                    ("Reservation Coverage", get_reservation_coverage, [ce]),
+                    ("Cost Forecast", get_cost_forecast, [ce]),
+                    ("Cost by Service", get_cost_by_service, [ce]),
+                ]
+
+                # Cost Optimization Hub (may not be available in all accounts)
+                try:
+                    coh = session.client("cost-optimization-hub")
+                    cost_scanners.append(("Cost Optimization Hub", get_cost_optimization_hub_recommendations, [coh]))
+                except Exception:
+                    pass
+
+                # Budgets
+                try:
+                    budgets_client = session.client("budgets")
+                    cost_scanners.append(("Budget Alerts", get_budget_alerts, [budgets_client, account_id]))
+                except Exception:
+                    pass
+
+                for name, func, args in cost_scanners:
+                    print(f"[SCAN]   Scanning {name}...")
+                    try:
+                        results = func(*args)
+                        findings += results
+                        print(f"[SCAN]     {len(results)} issues found")
+                    except Exception as e:
+                        err_str = str(e)
+                        if "SubscriptionRequired" in err_str or "OptInRequired" in err_str or "AccessDenied" in err_str:
+                            print(f"[SCAN]     {name}: skipped (not enabled/permitted)")
+                        else:
+                            print(f"[SCAN]     ERROR: {e}")
+                            errors.append(f"{name}: {e}")
+            except Exception as e:
+                print(f"[SCAN]   ERROR initializing cost intelligence: {e}")
+                errors.append(f"Cost Intelligence: {e}")
 
         # Store findings
         for f in findings:
@@ -1605,6 +1665,488 @@ def get_idle_workspaces(workspaces):
                         "resource_type": "WorkSpaces",
                         "reason": f"WorkSpace has never been connected to ({running_mode})",
                         "estimated_monthly_savings": est_cost,
+                    })
+    except Exception:
+        pass
+    return findings
+
+
+# --- Cost Intelligence Scanners (new) ---
+
+def get_compute_optimizer_ec2(compute_optimizer):
+    """Get EC2 rightsizing recommendations from Compute Optimizer."""
+    findings = []
+    try:
+        resp = compute_optimizer.get_ec2_instance_recommendations(maxResults=100)
+        for rec in resp.get("instanceRecommendations", []):
+            if rec.get("finding") in ("OVER_PROVISIONED", "UNDER_PROVISIONED"):
+                instance_id = rec.get("instanceArn", "").split("/")[-1]
+                instance_name = rec.get("instanceName", instance_id)
+                current_type = rec.get("currentInstanceType", "unknown")
+                finding = rec.get("finding")
+                options = rec.get("recommendationOptions", [])
+                recommended = options[0].get("instanceType", "unknown") if options else "unknown"
+                savings = 0
+                if options and options[0].get("estimatedMonthlySavings"):
+                    savings = options[0]["estimatedMonthlySavings"].get("value", 0)
+                findings.append({
+                    "resource_id": instance_id,
+                    "resource_name": instance_name,
+                    "resource_type": "ComputeOptimizer_EC2",
+                    "reason": f"{finding}: {current_type} → {recommended}",
+                    "estimated_monthly_savings": round(savings, 2),
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_compute_optimizer_ebs(compute_optimizer):
+    """Get EBS volume recommendations from Compute Optimizer."""
+    findings = []
+    try:
+        resp = compute_optimizer.get_ebs_volume_recommendations(maxResults=100)
+        for rec in resp.get("volumeRecommendations", []):
+            if rec.get("finding") == "NotOptimized":
+                vol_arn = rec.get("volumeArn", "")
+                vol_id = vol_arn.split("/")[-1] if "/" in vol_arn else vol_arn
+                current_config = rec.get("currentConfiguration", {})
+                current_type = current_config.get("volumeType", "unknown")
+                current_size = current_config.get("volumeSize", 0)
+                options = rec.get("volumeRecommendationOptions", [])
+                if options:
+                    opt = options[0]
+                    new_type = opt.get("configuration", {}).get("volumeType", "unknown")
+                    new_size = opt.get("configuration", {}).get("volumeSize", 0)
+                    savings = opt.get("estimatedMonthlySavings", {}).get("value", 0) if opt.get("estimatedMonthlySavings") else 0
+                    findings.append({
+                        "resource_id": vol_id,
+                        "resource_name": vol_id,
+                        "resource_type": "ComputeOptimizer_EBS",
+                        "reason": f"Not optimized: {current_type}/{current_size}GB → {new_type}/{new_size}GB",
+                        "estimated_monthly_savings": round(savings, 2),
+                    })
+    except Exception:
+        pass
+    return findings
+
+
+def get_compute_optimizer_lambda(compute_optimizer):
+    """Get Lambda function recommendations from Compute Optimizer."""
+    findings = []
+    try:
+        resp = compute_optimizer.get_lambda_function_recommendations(maxResults=100)
+        for rec in resp.get("lambdaFunctionRecommendations", []):
+            finding = rec.get("finding")
+            if finding in ("NotOptimized", "Unavailable"):
+                func_arn = rec.get("functionArn", "")
+                func_name = func_arn.split(":")[-1] if ":" in func_arn else func_arn
+                current_mem = rec.get("currentMemorySize", 0)
+                options = rec.get("memorySizeRecommendationOptions", [])
+                if options and finding == "NotOptimized":
+                    opt = options[0]
+                    new_mem = opt.get("memorySize", 0)
+                    savings = opt.get("estimatedMonthlySavings", {}).get("value", 0) if opt.get("estimatedMonthlySavings") else 0
+                    findings.append({
+                        "resource_id": func_arn,
+                        "resource_name": func_name,
+                        "resource_type": "ComputeOptimizer_Lambda",
+                        "reason": f"Over-provisioned memory: {current_mem}MB → {new_mem}MB",
+                        "estimated_monthly_savings": round(savings, 2),
+                    })
+    except Exception:
+        pass
+    return findings
+
+
+def get_compute_optimizer_ecs(compute_optimizer):
+    """Get ECS service recommendations from Compute Optimizer."""
+    findings = []
+    try:
+        resp = compute_optimizer.get_ecs_service_recommendations(maxResults=100)
+        for rec in resp.get("ecsServiceRecommendations", []):
+            finding = rec.get("finding")
+            if finding in ("OVER_PROVISIONED", "UNDER_PROVISIONED"):
+                svc_arn = rec.get("serviceArn", "")
+                svc_name = svc_arn.split("/")[-1] if "/" in svc_arn else svc_arn
+                options = rec.get("serviceRecommendationOptions", [])
+                savings = 0
+                if options and options[0].get("estimatedMonthlySavings"):
+                    savings = options[0]["estimatedMonthlySavings"].get("value", 0)
+                findings.append({
+                    "resource_id": svc_arn,
+                    "resource_name": svc_name,
+                    "resource_type": "ComputeOptimizer_ECS",
+                    "reason": f"ECS service {finding}",
+                    "estimated_monthly_savings": round(savings, 2),
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_compute_optimizer_rds(compute_optimizer):
+    """Get RDS recommendations from Compute Optimizer."""
+    findings = []
+    try:
+        resp = compute_optimizer.get_rds_database_recommendations(maxResults=100)
+        for rec in resp.get("rdsDatabaseRecommendations", []):
+            finding = rec.get("finding")
+            if finding in ("Overprovisioned", "Underprovisioned"):
+                db_arn = rec.get("resourceArn", "")
+                db_id = db_arn.split(":")[-1] if ":" in db_arn else db_arn
+                current_class = rec.get("currentDBInstanceClass", "unknown")
+                options = rec.get("recommendationOptions", [])
+                savings = 0
+                recommended_class = "unknown"
+                if options:
+                    recommended_class = options[0].get("dbInstanceClass", "unknown")
+                    if options[0].get("estimatedMonthlySavings"):
+                        savings = options[0]["estimatedMonthlySavings"].get("value", 0)
+                findings.append({
+                    "resource_id": db_arn,
+                    "resource_name": db_id,
+                    "resource_type": "ComputeOptimizer_RDS",
+                    "reason": f"{finding}: {current_class} → {recommended_class}",
+                    "estimated_monthly_savings": round(savings, 2),
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_compute_optimizer_idle(compute_optimizer):
+    """Get idle resource recommendations from Compute Optimizer."""
+    findings = []
+    try:
+        resp = compute_optimizer.get_idle_recommendations(maxResults=100)
+        for rec in resp.get("idleRecommendations", []):
+            resource_arn = rec.get("resourceArn", "")
+            resource_id = resource_arn.split("/")[-1] if "/" in resource_arn else resource_arn.split(":")[-1]
+            resource_type = rec.get("resourceType", "Unknown")
+            savings = rec.get("estimatedMonthlySavings", {}).get("value", 0) if rec.get("estimatedMonthlySavings") else 0
+            findings.append({
+                "resource_id": resource_arn,
+                "resource_name": resource_id,
+                "resource_type": f"ComputeOptimizer_Idle_{resource_type}",
+                "reason": f"Resource identified as idle by Compute Optimizer",
+                "estimated_monthly_savings": round(savings, 2),
+            })
+    except Exception:
+        pass
+    return findings
+
+
+def get_cost_optimization_hub_recommendations(cost_optimization_hub):
+    """Get recommendations from AWS Cost Optimization Hub."""
+    findings = []
+    try:
+        resp = cost_optimization_hub.list_recommendations(maxResults=100)
+        for rec in resp.get("items", []):
+            rec_id = rec.get("recommendationId", "")
+            resource_id = rec.get("resourceId", rec_id)
+            resource_type = rec.get("resourceType", "Unknown")
+            action_type = rec.get("actionType", "")
+            savings = rec.get("estimatedMonthlySavings", {}).get("value", 0) if rec.get("estimatedMonthlySavings") else 0
+            currency = rec.get("estimatedMonthlySavings", {}).get("currency", "USD") if rec.get("estimatedMonthlySavings") else "USD"
+            findings.append({
+                "resource_id": resource_id,
+                "resource_name": rec.get("resourceArn", resource_id),
+                "resource_type": f"CostOptHub_{resource_type}",
+                "reason": f"{action_type}: {rec.get('recommendationLookbackPeriodInDays', 14)}-day analysis",
+                "estimated_monthly_savings": round(savings, 2),
+            })
+    except Exception:
+        pass
+    return findings
+
+
+def get_cost_anomalies(ce):
+    """Get recent cost anomalies from Cost Explorer."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        resp = ce.get_anomalies(
+            DateInterval={"StartDate": (now - timedelta(days=30)).strftime("%Y-%m-%d"), "EndDate": now.strftime("%Y-%m-%d")},
+            MaxResults=50,
+        )
+        for anomaly in resp.get("Anomalies", []):
+            anomaly_id = anomaly.get("AnomalyId", "")
+            impact = anomaly.get("Impact", {})
+            total_impact = impact.get("TotalImpact", 0)
+            if total_impact > 10:  # Only report anomalies > $10
+                service = anomaly.get("DimensionValue", "Unknown Service")
+                findings.append({
+                    "resource_id": anomaly_id,
+                    "resource_name": service,
+                    "resource_type": "Cost_Anomaly",
+                    "reason": f"Unexpected spend spike: ${total_impact:.2f} above expected",
+                    "estimated_monthly_savings": round(total_impact, 2),
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_savings_plans_recommendations(ce):
+    """Get Savings Plans purchase recommendations."""
+    findings = []
+    try:
+        for sp_type in ["COMPUTE_SP", "EC2_INSTANCE_SP"]:
+            try:
+                resp = ce.get_savings_plans_purchase_recommendation(
+                    SavingsPlansType=sp_type,
+                    TermInYears="ONE_YEAR",
+                    PaymentOption="NO_UPFRONT",
+                    LookbackPeriodInDays="THIRTY_DAYS",
+                )
+                for rec in resp.get("SavingsPlansPurchaseRecommendation", {}).get("SavingsPlansPurchaseRecommendationDetails", []):
+                    hourly_commitment = float(rec.get("HourlyCommitmentToPurchase", "0"))
+                    monthly_savings = float(rec.get("EstimatedMonthlySavingsAmount", "0"))
+                    if monthly_savings > 0:
+                        findings.append({
+                            "resource_id": f"SP-{sp_type}-{hourly_commitment:.4f}",
+                            "resource_name": f"{sp_type} (${hourly_commitment:.2f}/hr)",
+                            "resource_type": "SavingsPlan_Recommendation",
+                            "reason": f"Purchase {sp_type} at ${hourly_commitment:.2f}/hr to save ${monthly_savings:.2f}/mo",
+                            "estimated_monthly_savings": round(monthly_savings, 2),
+                        })
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return findings
+
+
+def get_reservation_recommendations(ce):
+    """Get Reserved Instance purchase recommendations."""
+    findings = []
+    try:
+        for service in ["Amazon Elastic Compute Cloud - Compute", "Amazon Relational Database Service"]:
+            try:
+                resp = ce.get_reservation_purchase_recommendation(
+                    Service=service,
+                    TermInYears="ONE_YEAR",
+                    PaymentOption="NO_UPFRONT",
+                    LookbackPeriodInDays="THIRTY_DAYS",
+                )
+                for rec in resp.get("Recommendations", []):
+                    for detail in rec.get("RecommendationDetails", []):
+                        instance_type = detail.get("InstanceDetails", {})
+                        monthly_savings = float(detail.get("EstimatedMonthlySavingsAmount", "0"))
+                        if monthly_savings > 0:
+                            desc = str(instance_type)[:60] if instance_type else service[:30]
+                            findings.append({
+                                "resource_id": f"RI-{service[:10]}-{desc[:20]}",
+                                "resource_name": desc,
+                                "resource_type": "RI_Recommendation",
+                                "reason": f"Purchase RI for {service.split(' - ')[0].split('Amazon ')[-1]}",
+                                "estimated_monthly_savings": round(monthly_savings, 2),
+                            })
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return findings
+
+
+def get_budget_alerts(budgets_client, account_id):
+    """Find budgets that are over threshold."""
+    findings = []
+    try:
+        resp = budgets_client.describe_budgets(AccountId=account_id, MaxResults=100)
+        for budget in resp.get("Budgets", []):
+            budget_name = budget.get("BudgetName", "")
+            limit = float(budget.get("BudgetLimit", {}).get("Amount", "0"))
+            actual = float(budget.get("CalculatedSpend", {}).get("ActualSpend", {}).get("Amount", "0"))
+            if limit > 0 and actual > limit * 0.8:
+                pct = (actual / limit) * 100
+                over = actual - limit if actual > limit else 0
+                findings.append({
+                    "resource_id": budget_name,
+                    "resource_name": budget_name,
+                    "resource_type": "Budget_Alert",
+                    "reason": f"Budget at {pct:.0f}% (${actual:.2f} of ${limit:.2f} limit)",
+                    "estimated_monthly_savings": round(over, 2) if over > 0 else 0,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_cost_by_service(ce):
+    """Get cost breakdown by service for the last 30 days."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        resp = ce.get_cost_and_usage(
+            TimePeriod={"Start": (now - timedelta(days=30)).strftime("%Y-%m-%d"), "End": now.strftime("%Y-%m-%d")},
+            Granularity="MONTHLY",
+            Metrics=["UnblendedCost"],
+            GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
+        )
+        for group in resp.get("ResultsByTime", [{}])[0].get("Groups", []):
+            service = group["Keys"][0]
+            amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
+            if amount > 50:  # Only report services costing > $50/mo
+                findings.append({
+                    "resource_id": f"cost-{service[:30]}",
+                    "resource_name": service,
+                    "resource_type": "Cost_Usage",
+                    "reason": f"${amount:.2f} spend in last 30 days",
+                    "estimated_monthly_savings": 0,
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_savings_plans_utilization(ce):
+    """Check Savings Plans utilization — low utilization means wasted commitment."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        resp = ce.get_savings_plans_utilization(
+            TimePeriod={"Start": (now - timedelta(days=30)).strftime("%Y-%m-%d"), "End": now.strftime("%Y-%m-%d")},
+        )
+        total = resp.get("Total", {})
+        utilization_pct = float(total.get("Utilization", {}).get("UtilizationPercentage", "100"))
+        unused_commitment = float(total.get("AmortizedCommitment", {}).get("TotalAmortizedCommitment", "0")) * (1 - utilization_pct / 100)
+        if utilization_pct < 80 and unused_commitment > 10:
+            findings.append({
+                "resource_id": "savings-plans-utilization",
+                "resource_name": "Savings Plans",
+                "resource_type": "SavingsPlans_Utilization",
+                "reason": f"Savings Plans only {utilization_pct:.1f}% utilized (${unused_commitment:.2f}/mo wasted)",
+                "estimated_monthly_savings": round(unused_commitment, 2),
+            })
+    except Exception:
+        pass
+    return findings
+
+
+def get_reservation_utilization(ce):
+    """Check Reserved Instance utilization — low utilization means wasted commitment."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        resp = ce.get_reservation_utilization(
+            TimePeriod={"Start": (now - timedelta(days=30)).strftime("%Y-%m-%d"), "End": now.strftime("%Y-%m-%d")},
+        )
+        total = resp.get("Total", {})
+        utilization_pct = float(total.get("UtilizationPercentage", "100"))
+        unused = float(total.get("UnusedHours", "0"))
+        if utilization_pct < 80 and unused > 100:
+            findings.append({
+                "resource_id": "ri-utilization",
+                "resource_name": "Reserved Instances",
+                "resource_type": "RI_Utilization",
+                "reason": f"RIs only {utilization_pct:.1f}% utilized ({unused:.0f} unused hours)",
+                "estimated_monthly_savings": 0,
+            })
+    except Exception:
+        pass
+    return findings
+
+
+def get_savings_plans_coverage(ce):
+    """Check Savings Plans coverage — low coverage means potential savings from buying SPs."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        resp = ce.get_savings_plans_coverage(
+            TimePeriod={"Start": (now - timedelta(days=30)).strftime("%Y-%m-%d"), "End": now.strftime("%Y-%m-%d")},
+        )
+        for period in resp.get("SavingsPlansCoverages", []):
+            coverage = period.get("Coverage", {})
+            coverage_pct = float(coverage.get("CoveragePercentage", "100"))
+            on_demand_cost = float(coverage.get("OnDemandCost", "0"))
+            if coverage_pct < 50 and on_demand_cost > 100:
+                potential_savings = on_demand_cost * 0.20  # Rough estimate: 20% savings
+                findings.append({
+                    "resource_id": "sp-coverage",
+                    "resource_name": "Savings Plans Coverage",
+                    "resource_type": "SavingsPlans_Coverage",
+                    "reason": f"Only {coverage_pct:.0f}% of spend covered by Savings Plans (${on_demand_cost:.2f} on-demand)",
+                    "estimated_monthly_savings": round(potential_savings, 2),
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def get_reservation_coverage(ce):
+    """Check RI coverage — low coverage means on-demand spend that could be reserved."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        resp = ce.get_reservation_coverage(
+            TimePeriod={"Start": (now - timedelta(days=30)).strftime("%Y-%m-%d"), "End": now.strftime("%Y-%m-%d")},
+        )
+        total = resp.get("Total", {})
+        coverage_hours = total.get("CoverageHours", {})
+        coverage_pct = float(coverage_hours.get("CoverageHoursPercentage", "100"))
+        on_demand_hours = float(coverage_hours.get("OnDemandHours", "0"))
+        if coverage_pct < 50 and on_demand_hours > 500:
+            findings.append({
+                "resource_id": "ri-coverage",
+                "resource_name": "Reserved Instance Coverage",
+                "resource_type": "RI_Coverage",
+                "reason": f"Only {coverage_pct:.0f}% of instance hours covered by RIs",
+                "estimated_monthly_savings": 0,
+            })
+    except Exception:
+        pass
+    return findings
+
+
+def get_cost_forecast(ce):
+    """Get cost forecast vs current spend to detect trending increases."""
+    findings = []
+    now = datetime.now(timezone.utc)
+    try:
+        # Get current month spend
+        month_start = now.replace(day=1).strftime("%Y-%m-%d")
+        month_end = now.strftime("%Y-%m-%d")
+        current_resp = ce.get_cost_and_usage(
+            TimePeriod={"Start": month_start, "End": month_end},
+            Granularity="MONTHLY",
+            Metrics=["UnblendedCost"],
+        )
+        current_spend = float(current_resp.get("ResultsByTime", [{}])[0].get("Total", {}).get("UnblendedCost", {}).get("Amount", "0"))
+
+        # Get forecast for rest of month
+        forecast_start = now.strftime("%Y-%m-%d")
+        next_month = (now.replace(day=28) + timedelta(days=4)).replace(day=1)
+        forecast_end = next_month.strftime("%Y-%m-%d")
+        if forecast_start < forecast_end:
+            forecast_resp = ce.get_cost_forecast(
+                TimePeriod={"Start": forecast_start, "End": forecast_end},
+                Metric="UNBLENDED_COST",
+                Granularity="MONTHLY",
+            )
+            forecast_total = float(forecast_resp.get("Total", {}).get("Amount", "0"))
+            projected_total = current_spend + forecast_total
+
+            # Compare to last month
+            last_month_start = (now.replace(day=1) - timedelta(days=1)).replace(day=1).strftime("%Y-%m-%d")
+            last_month_end = now.replace(day=1).strftime("%Y-%m-%d")
+            last_resp = ce.get_cost_and_usage(
+                TimePeriod={"Start": last_month_start, "End": last_month_end},
+                Granularity="MONTHLY",
+                Metrics=["UnblendedCost"],
+            )
+            last_month_spend = float(last_resp.get("ResultsByTime", [{}])[0].get("Total", {}).get("UnblendedCost", {}).get("Amount", "0"))
+
+            if last_month_spend > 0:
+                increase_pct = ((projected_total - last_month_spend) / last_month_spend) * 100
+                if increase_pct > 15:  # Flag if projected > 15% increase
+                    findings.append({
+                        "resource_id": "cost-forecast",
+                        "resource_name": "Monthly Cost Forecast",
+                        "resource_type": "Cost_Forecast",
+                        "reason": f"Projected ${projected_total:.2f} this month ({increase_pct:.0f}% increase vs last month ${last_month_spend:.2f})",
+                        "estimated_monthly_savings": 0,
                     })
     except Exception:
         pass

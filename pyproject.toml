@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "open-aws-scanner"
-version = "0.2.1"
+version = "0.3.0"
 description = "Find unused AWS resources costing you money. No admin, no auth, just results."
 readme = "README.md"
 license = {text = "MIT"}
