@@ -25,13 +25,85 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 limiter = Limiter(key_func=get_remote_address)
+from fastapi.responses import HTMLResponse
+from . import __version__
+
 app = FastAPI(
     title="Open AWS Scanner",
-    version="1.0.0",
+    version=__version__,
     description="Simple AWS waste detection — no admin, no auth, just results.",
+    docs_url=None,  # We'll serve custom docs
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.get("/docs", include_in_schema=False)
+def custom_swagger_docs():
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Open AWS Scanner — API Docs</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+    <style>
+        body {{ margin: 0; padding-bottom: 56px; }}
+        .swagger-ui .topbar {{ display: none !important; }}
+        .custom-footer {{
+            background: #0f172a;
+            border-top: 1px solid #334155;
+            padding: 14px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-family: Inter, -apple-system, sans-serif;
+            font-size: 11px;
+            color: #94a3b8;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+        }}
+        .custom-footer a {{ color: #10b981; text-decoration: none; }}
+        .custom-footer a:hover {{ text-decoration: underline; }}
+        .custom-footer .brand {{ display: flex; align-items: center; gap: 8px; }}
+        .custom-footer .brand-icon {{
+            width: 16px; height: 16px; border-radius: 4px;
+            background: linear-gradient(135deg, #10b981, #06b6d4);
+            display: flex; align-items: center; justify-content: center;
+            color: white; font-weight: bold; font-size: 8px;
+        }}
+    </style>
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <div class="custom-footer">
+        <div class="brand">
+            <div class="brand-icon">C</div>
+            <span>Open AWS Scanner v{__version__}</span>
+            <span style="opacity:0.5">·</span>
+            <span>by <a href="https://pypi.org/project/open-aws-scanner/">acmebeans</a></span>
+        </div>
+        <div>
+            <a href="https://github.com/cost-ops/open-AWS-scanner">GitHub</a>
+            <span style="opacity:0.3;margin:0 8px">|</span>
+            <a href="https://pypi.org/project/open-aws-scanner/">PyPI</a>
+            <span style="opacity:0.3;margin:0 8px">|</span>
+            <span>Part of the <a href="https://costops.co">Cost-OPS</a> platform</span>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+        SwaggerUIBundle({{
+            url: '/openapi.json',
+            dom_id: '#swagger-ui',
+            defaultModelsExpandDepth: -1,
+            layout: 'BaseLayout'
+        }});
+    </script>
+</body>
+</html>""")
+
 
 app.add_middleware(
     CORSMiddleware,
