@@ -3,7 +3,7 @@
 ## Project Stats
 - **Started:** July 2026
 - **Published:** PyPI (`open-aws-scanner`)
-- **Version:** 0.3.1
+- **Version:** 0.3.2
 - **Scanners:** 72 AWS resource types
 - **Estimated effort (with AI):** 8-12 hours
 - **Equivalent manual effort:** 2-3 weeks solo developer
@@ -11,6 +11,12 @@
 ---
 
 ## Changelog
+
+### 2026-07-14
+- **v0.3.2**: Dynamic `scanner_count` in `/health` and `/status` endpoints
+  - No more hardcoded scanner count — uses `inspect` to count `get_*` functions
+  - Version string pulled from `__version__` instead of hardcoded
+  - Dashboard and admin apps now pull scanner count from API dynamically
 
 ### 2026-07-10
 - **v0.3.0**: 17 new Cost Intelligence scanners (72 total)
