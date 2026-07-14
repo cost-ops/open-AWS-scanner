@@ -22,7 +22,7 @@ Find unused AWS resources costing you money. No admin panel, no Keycloak, no mul
 - [API Reference](#api-reference)
 - [What It Scans](#what-it-scans)
 - [Configuration Reference](#configuration-reference)
-- [Relationship to CostOps Platform](#relationship-to-costops-platform)
+- [Relationship to Cost-OPS Platform](#relationship-to-costops-platform)
 - [License](#license)
 
 ---
@@ -623,9 +623,9 @@ All settings go in `config.env` (or as environment variables):
 
 ---
 
-## Relationship to CostOps Platform
+## Relationship to Cost-OPS Platform
 
-This is the open-source core of the [CostOps AWS Scanner](../costops-AWS-scanner/) platform. The full platform adds:
+This is the open-source core of the [Cost-OPS AWS Scanner](../costops-AWS-scanner/) platform. The full platform adds:
 
 - Multi-tenant support with per-tenant IAM role assumption
 - Keycloak SSO with JWT zero-trust auth on every endpoint

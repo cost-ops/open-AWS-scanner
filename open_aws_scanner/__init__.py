@@ -1,3 +1,3 @@
 """Open AWS Scanner - Find unused AWS resources costing you money."""
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
