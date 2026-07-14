@@ -3,14 +3,27 @@
 ## Project Stats
 - **Started:** July 2026
 - **Published:** PyPI (`open-aws-scanner`)
-- **Version:** 0.2.1
-- **Scanners:** 55 AWS resource types
+- **Version:** 0.3.1
+- **Scanners:** 72 AWS resource types
 - **Estimated effort (with AI):** 8-12 hours
 - **Equivalent manual effort:** 2-3 weeks solo developer
 
 ---
 
 ## Changelog
+
+### 2026-07-10
+- **v0.3.0**: 17 new Cost Intelligence scanners (72 total)
+  - Compute Optimizer: EC2, EBS, Lambda, ECS, RDS rightsizing + idle detection
+  - Cost Optimization Hub: aggregated AWS recommendations
+  - Cost Anomalies: unexpected spend spike detection
+  - Savings Plans: purchase recommendations, utilization & coverage
+  - Reserved Instances: purchase recommendations, utilization & coverage
+  - Budget Alerts, Cost Forecast, Cost by Service
+- **v0.3.1**: Fix `__version__` string
+- **IAM policy updated**: 139 permissions across 54 AWS services
+- **run_scan() updated**: All 72 scanners now execute in open-aws-scanner's built-in scan
+- Published to PyPI via GitHub Actions (Trusted Publisher + Sigstore signing)
 
 ### 2026-07-09
 - **v0.2.0**: All 55 scanners ported from costops to open package

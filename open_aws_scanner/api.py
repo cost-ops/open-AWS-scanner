@@ -65,7 +65,17 @@ def startup_event():
 
 @app.get("/health")
 def health_check():
-    return {"status": "online", "scan_interval_hours": SCAN_INTERVAL_HOURS}
+    import inspect
+    from . import scanner as scanner_module
+    from . import __version__
+    scanner_funcs = [name for name, obj in inspect.getmembers(scanner_module, inspect.isfunction)
+                     if name.startswith("get_") and name not in ("get_aws_session", "get_mock_findings")]
+    return {
+        "status": "online",
+        "version": __version__,
+        "scan_interval_hours": SCAN_INTERVAL_HOURS,
+        "scanner_count": len(scanner_funcs),
+    }
 
 
 @app.get("/status")
@@ -81,9 +91,16 @@ def scanner_status():
     jobs = scheduler.get_jobs()
     active_scanners = len([j for j in jobs if j.id.startswith("scheduled")])
 
+    import inspect
+    from . import scanner as scanner_module
+    from . import __version__
+    scanner_funcs = [name for name, obj in inspect.getmembers(scanner_module, inspect.isfunction)
+                     if name.startswith("get_") and name not in ("get_aws_session", "get_mock_findings")]
+
     return {
         "status": "online",
-        "version": "0.2.0",
+        "version": __version__,
+        "scanner_count": len(scanner_funcs),
         "active_scanners": active_scanners,
         "scheduled_jobs": len(jobs),
         "scan_interval_hours": SCAN_INTERVAL_HOURS,
