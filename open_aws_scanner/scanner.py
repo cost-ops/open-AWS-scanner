@@ -520,8 +520,11 @@ def run_scan():
                     logs = session.client("logs")
                     sns = session.client("sns")
                     secretsmanager = session.client("secretsmanager")
+<<<<<<< HEAD
                     ecs = session.client("ecs")
                     compute_optimizer = session.client("compute-optimizer")
+=======
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
 
                     scanners = [
                         ("EBS Volumes", get_unused_ebs_volumes, [ec2]),
@@ -541,6 +544,7 @@ def run_scan():
                         ("ElastiCache Clusters", get_idle_elasticache_clusters, [elasticache, cloudwatch]),
                         ("CloudWatch Log Groups", get_idle_log_groups, [logs]),
                         ("Secrets Manager", get_unused_secrets, [secretsmanager]),
+<<<<<<< HEAD
                         ("ECS Services", get_idle_ecs_services, [ecs, cloudwatch]),
                         ("Compute Optimizer EC2", get_compute_optimizer_ec2, [compute_optimizer]),
                         ("Compute Optimizer EBS", get_compute_optimizer_ebs, [compute_optimizer]),
@@ -548,6 +552,8 @@ def run_scan():
                         ("Compute Optimizer ECS", get_compute_optimizer_ecs, [compute_optimizer]),
                         ("Compute Optimizer RDS", get_compute_optimizer_rds, [compute_optimizer]),
                         ("Compute Optimizer Idle", get_compute_optimizer_idle, [compute_optimizer]),
+=======
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
                     ]
 
                     for name, func, args in scanners:
@@ -569,6 +575,7 @@ def run_scan():
                     print(f"[SCAN]   ERROR initializing region {aws_region}: {e}")
                     errors.append(f"Region {aws_region}: {e}")
 
+<<<<<<< HEAD
             # Cost Intelligence scanners (region-independent)
             print("[SCAN]   === Cost Intelligence ===")
             try:
@@ -620,6 +627,8 @@ def run_scan():
                 print(f"[SCAN]   ERROR initializing cost intelligence: {e}")
                 errors.append(f"Cost Intelligence: {e}")
 
+=======
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
         # Store findings
         for f in findings:
             existing = db.query(ScanResult).filter(
@@ -662,6 +671,7 @@ def run_scan():
         db.close()
 
     return findings
+<<<<<<< HEAD
 
 
 # --- Additional Scanners (advanced) ---
@@ -2151,3 +2161,5 @@ def get_cost_forecast(ce):
     except Exception:
         pass
     return findings
+=======
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)

@@ -22,7 +22,11 @@ Find unused AWS resources costing you money. No admin panel, no Keycloak, no mul
 - [API Reference](#api-reference)
 - [What It Scans](#what-it-scans)
 - [Configuration Reference](#configuration-reference)
+<<<<<<< HEAD
 - [Relationship to Cost-OPS Platform](#relationship-to-costops-platform)
+=======
+- [Relationship to CostOps Platform](#relationship-to-costops-platform)
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
 - [License](#license)
 
 ---
@@ -412,14 +416,21 @@ If scanning a different AWS account, create a read-only role:
   "Version": "2012-10-17",
   "Statement": [
     {
+<<<<<<< HEAD
       "Sid": "OpenScannerReadOnly",
+=======
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
       "Effect": "Allow",
       "Action": [
         "ec2:Describe*",
         "rds:DescribeDBInstances",
+<<<<<<< HEAD
         "rds:DescribeDBClusters",
         "lambda:ListFunctions",
         "lambda:ListProvisionedConcurrencyConfigs",
+=======
+        "lambda:ListFunctions",
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
         "s3:ListAllMyBuckets",
         "s3:ListBucket",
         "sqs:ListQueues",
@@ -429,6 +440,7 @@ If scanning a different AWS account, create a read-only role:
         "elasticache:DescribeCacheClusters",
         "logs:DescribeLogGroups",
         "logs:DescribeLogStreams",
+<<<<<<< HEAD
         "logs:StartQuery",
         "logs:GetQueryResults",
         "secretsmanager:ListSecrets",
@@ -498,6 +510,10 @@ If scanning a different AWS account, create a read-only role:
         "bcm-pricing-calculator:GetWorkloadEstimate",
         "bcm-pricing-calculator:ListWorkloadEstimateUsage",
         "bcm-pricing-calculator:ListWorkloadEstimates"
+=======
+        "secretsmanager:ListSecrets",
+        "cloudwatch:GetMetricStatistics"
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
       ],
       "Resource": "*"
     }
@@ -623,9 +639,15 @@ All settings go in `config.env` (or as environment variables):
 
 ---
 
+<<<<<<< HEAD
 ## Relationship to Cost-OPS Platform
 
 This is the open-source core of the [Cost-OPS AWS Scanner](../costops-AWS-scanner/) platform. The full platform adds:
+=======
+## Relationship to CostOps Platform
+
+This is the open-source core of the [CostOps AWS Scanner](../costops-AWS-scanner/) platform. The full platform adds:
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
 
 - Multi-tenant support with per-tenant IAM role assumption
 - Keycloak SSO with JWT zero-trust auth on every endpoint

@@ -6,13 +6,19 @@ import json
 
 
 def main():
+<<<<<<< HEAD
     from . import __version__
 
+=======
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
     parser = argparse.ArgumentParser(
         prog="open-aws-scanner",
         description="Find unused AWS resources costing you money.",
     )
+<<<<<<< HEAD
     parser.add_argument("--version", "-v", action="version", version=f"open-aws-scanner {__version__}")
+=======
+>>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
     subparsers = parser.add_subparsers(dest="command")
 
     # serve - start the API server
