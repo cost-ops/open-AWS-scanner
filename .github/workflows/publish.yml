@@ -5,7 +5,6 @@ on:
     types: [published]
 
 permissions:
-<<<<<<< HEAD
   id-token: write
   contents: write
 
@@ -16,14 +15,12 @@ jobs:
     permissions:
       id-token: write
       contents: write
-=======
   id-token: write  # Required for Trusted Publisher + Sigstore
   contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
->>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +34,6 @@ jobs:
       - name: Build package
         run: python -m build
 
-<<<<<<< HEAD
       - name: Sign with Sigstore
         run: |
           pip install sigstore
@@ -54,7 +50,6 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-=======
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -102,4 +97,3 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         # No API token needed — uses OIDC Trusted Publisher
->>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)

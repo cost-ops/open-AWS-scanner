@@ -25,7 +25,6 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 limiter = Limiter(key_func=get_remote_address)
-<<<<<<< HEAD
 from fastapi.responses import HTMLResponse
 from . import __version__
 
@@ -34,17 +33,13 @@ app = FastAPI(
     version=__version__,
     description="Simple AWS waste detection — no admin, no auth, just results.",
     docs_url=None,  # We'll serve custom docs
-=======
 app = FastAPI(
     title="Open AWS Scanner",
     version="1.0.0",
-    description="Simple AWS waste detection — no admin, no auth, just results.",
->>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
-)
+    description="Simple AWS waste detection — no admin, no auth, just results.",)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-<<<<<<< HEAD
 
 @app.get("/docs", include_in_schema=False)
 def custom_swagger_docs():
@@ -113,8 +108,6 @@ def custom_swagger_docs():
 </html>""")
 
 
-=======
->>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -147,7 +140,6 @@ def startup_event():
 
 @app.get("/health")
 def health_check():
-<<<<<<< HEAD
     import inspect
     from . import scanner as scanner_module
     from . import __version__
@@ -193,9 +185,7 @@ def scanner_status():
         "last_scan": last_run.completed_at.isoformat() if last_run and last_run.completed_at else None,
         "last_scan_status": last_run.status if last_run else None,
     }
-=======
     return {"status": "online", "scan_interval_hours": SCAN_INTERVAL_HOURS}
->>>>>>> 0701d02 (Initial commit: open-aws-scanner v0.1.0)
 
 
 # --- Dashboard ---
