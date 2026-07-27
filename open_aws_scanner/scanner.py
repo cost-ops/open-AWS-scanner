@@ -1,6 +1,6 @@
 """
 Open AWS Scanner - Simplified AWS waste detection tool.
-No admin, no Keycloak, no multi-tenant. Just point at your AWS account and scan.
+No admin, hosted identity service, or multi-tenant layer. Just point at your AWS account and scan.
 """
 import boto3
 import json

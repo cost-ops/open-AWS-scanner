@@ -1,6 +1,6 @@
 # Open AWS Scanner
 
-Find unused AWS resources costing you money. No admin panel, no Keycloak, no multi-tenant complexity — just point it at your AWS account and find waste.
+Find unused AWS resources costing you money. No admin panel, hosted identity service, or multi-tenant complexity — just point it at your AWS account and find waste.
 
 ---
 
@@ -628,7 +628,7 @@ All settings go in `config.env` (or as environment variables):
 This is the open-source core of the [Cost-OPS AWS Scanner](../costops-AWS-scanner/) platform. The full platform adds:
 
 - Multi-tenant support with per-tenant IAM role assumption
-- Keycloak SSO with JWT zero-trust auth on every endpoint
+- Amazon Cognito SSO with JWT zero-trust auth on every endpoint
 - Admin API for tenant/user/billing management
 - React dashboard with drag-and-drop tiles
 - AWS Cost Explorer integration (rightsizing, RI/Savings Plans utilization)
