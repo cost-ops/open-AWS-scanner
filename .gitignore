@@ -6,3 +6,4 @@ build/
 *.db
 .env
 config.env
+DEVLOG.bak
