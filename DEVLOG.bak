@@ -75,3 +75,7 @@
 | SSH commit signing | Verified commits on GitHub |
 | PyPI Trusted Publisher | No API tokens, OIDC-based publish from GitHub Actions |
 | MIT license | Maximum adoption, no legal barriers |
+
+### Deployment operations
+
+- Added the shared ECR lifecycle policy: untagged images expire after seven days and only the three newest images are retained.
