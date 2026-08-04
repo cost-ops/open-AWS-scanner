@@ -79,3 +79,4 @@
 ### Deployment operations
 
 - Added the shared ECR lifecycle policy: untagged images expire after seven days and only the three newest images are retained.
+- Confirmed the Admin tenant product-selector update does not change the open scanner core.

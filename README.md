@@ -642,3 +642,6 @@ The full scanner imports scanning functions from this package — one codebase, 
 ## License
 
 MIT
+
+The scanner core remains independent of the Admin tenant product-selector UI;
+no scanner package or deployment change is required for that frontend update.
