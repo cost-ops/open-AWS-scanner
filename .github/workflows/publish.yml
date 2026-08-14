@@ -1,5 +1,5 @@
 name: Publish to PyPI
-   
+
 on:
   release:
     types: [published]
@@ -80,7 +80,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} dist/*.sigstore.json
+          gh release upload --clobber ${{ github.event.release.tag_name }} dist/*.sigstore.json
 
       - name: Remove signatures before publish
         run: rm -f dist/*.sigstore.json
