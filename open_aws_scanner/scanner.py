@@ -244,6 +244,29 @@ def get_idle_nat_gateways(ec2, cloudwatch):
     for nat in ec2.describe_nat_gateways(Filter=[{"Name": "state", "Values": ["available"]}])["NatGateways"]:
         nat_id = nat["NatGatewayId"]
         name = next((t["Value"] for t in nat.get("Tags", []) if t["Key"] == "Name"), nat_id)
+        # A NAT can have low traffic and still be required for private
+        # subnets. Follow routes to this NAT and check for active ENIs in the
+        # associated subnets before recommending deletion.
+        route_tables = ec2.describe_route_tables(
+            Filters=[{"Name": "route.nat-gateway-id", "Values": [nat_id]}]
+        ).get("RouteTables", [])
+        dependent_subnets = {
+            association["SubnetId"]
+            for route_table in route_tables
+            for association in route_table.get("Associations", [])
+            if association.get("SubnetId")
+        }
+        has_active_dependents = any(
+            ec2.describe_network_interfaces(
+                Filters=[
+                    {"Name": "subnet-id", "Values": [subnet_id]},
+                    {"Name": "status", "Values": ["in-use"]},
+                ]
+            ).get("NetworkInterfaces", [])
+            for subnet_id in dependent_subnets
+        )
+        if has_active_dependents:
+            continue
         metrics = cloudwatch.get_metric_statistics(
             Namespace="AWS/NATGateway", MetricName="BytesOutToDestination",
             Dimensions=[{"Name": "NatGatewayId", "Value": nat_id}],
